@@ -87,7 +87,9 @@ def plot_cumulative_ls_returns(dates, ls_returns_dict,
                                 save_path=None):
     fig, ax = plt.subplots(figsize=(12, 6))
     for i, (label, returns) in enumerate(ls_returns_dict.items()):
-        cumulative = np.cumprod(1 + np.array(returns)) - 1
+        # Use log cumulative returns to avoid compounding explosion
+        log_rets   = np.log1p(np.array(returns))
+        cumulative = np.expm1(np.cumsum(log_rets))
         ax.plot(dates, cumulative, label=label,
                 color=COLORS[i], linewidth=2)
     ax.set_xlabel('Date', fontsize=12)

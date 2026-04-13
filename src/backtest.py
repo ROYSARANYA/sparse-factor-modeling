@@ -63,26 +63,54 @@ def compute_metrics(predictions, actuals):
     """
     Compute out-of-sample performance metrics.
 
+    Long-short construction:
+    - Rank portfolios by predicted return each month
+    - Long top quintile (5 portfolios), short bottom quintile (5)
+    - LS return = long return - short return
+    - Sharpe annualized using monthly returns
+
     Returns
     -------
-    dict with OOS_R2, Sharpe, Mean_LS_Return, Std_LS_Return
+    dict with OOS_R2, Sharpe, Mean_LS_Return, Std_LS_Return,
+    Ann_LS_Return
     """
     oos_r2 = r2_score(actuals.flatten(), predictions.flatten())
 
-    # Long-short: long top 5 predicted portfolios, short bottom 5
+    # Long-short: long top 3, short bottom 3
+    # Using 3 portfolios each side to reduce noise
+    # while avoiding full size/value structural spread
     ls_returns = []
     for pred, actual in zip(predictions, actuals):
         ranks     = np.argsort(pred)
-        long_ret  = actual[ranks[-5:]].mean()
-        short_ret = actual[ranks[:5]].mean()
+        long_ret  = actual[ranks[-3:]].mean()
+        short_ret = actual[ranks[:3]].mean()
         ls_returns.append(long_ret - short_ret)
 
     ls_returns = np.array(ls_returns)
-    sharpe     = ls_returns.mean() / ls_returns.std() * np.sqrt(12)
+
+    # Annualized metrics
+    ann_return = ls_returns.mean() * 12
+    ann_vol    = ls_returns.std() * np.sqrt(12)
+    sharpe     = ann_return / ann_vol
+
+    # Information coefficient - rank correlation
+    # between predicted and actual returns
+    from scipy.stats import spearmanr
+    ic_scores = []
+    for pred, actual in zip(predictions, actuals):
+        ic, _ = spearmanr(pred, actual)
+        ic_scores.append(ic)
+    ic_mean = np.mean(ic_scores)
+    ic_std  = np.std(ic_scores)
+    icir    = ic_mean / ic_std if ic_std > 0 else 0
 
     return {
         'OOS_R2':         round(oos_r2, 4),
         'Sharpe':         round(sharpe, 4),
-        'Mean_LS_Return': round(ls_returns.mean(), 4),
-        'Std_LS_Return':  round(ls_returns.std(), 4),
+        'Ann_Return':     round(ann_return * 100, 2),
+        'Ann_Vol':        round(ann_vol * 100, 2),
+        'Mean_LS_Return': round(ls_returns.mean() * 100, 4),
+        'IC_Mean':        round(ic_mean, 4),
+        'IC_Std':         round(ic_std, 4),
+        'ICIR':           round(icir, 4),
     }
