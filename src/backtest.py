@@ -114,3 +114,69 @@ def compute_metrics(predictions, actuals):
         'IC_Std':         round(ic_std, 4),
         'ICIR':           round(icir, 4),
     }
+
+
+def walk_forward_backtest_adaptive(X, Y, model_class,
+                                    base_alpha, window=12,
+                                    train_window=120, step=1,
+                                    **model_kwargs):
+    """
+    Walk-forward backtest with regime-aware adaptive lambda.
+    Lambda scales with rolling market volatility.
+    
+    Parameters
+    ----------
+    X          : pd.DataFrame (T x 6)
+    Y          : pd.DataFrame (T x 25)
+    base_alpha : float — baseline lambda
+    window     : int — vol estimation window
+    """
+    from src.regime import compute_adaptive_lambda
+
+    T        = len(X)
+    X_vals   = X.values
+    X_mean   = X_vals.mean(axis=0)
+    X_std    = X_vals.std(axis=0)
+    X_scaled = (X_vals - X_mean) / X_std
+    Y_vals   = Y.values
+
+    # Compute adaptive lambda for each time step
+    mkt_returns              = X['Mkt-RF']
+    adaptive_lambdas, vol    = compute_adaptive_lambda(
+        mkt_returns, base_alpha, window=window
+    )
+
+    predictions, actuals, dates     = [], [], []
+    coefs_over_time, lambdas_used   = [], []
+
+    for t in range(train_window, T, step):
+        X_train  = X_scaled[t - train_window:t]
+        Y_train  = Y_vals[t - train_window:t]
+        X_test   = X_scaled[t:t + 1]
+        Y_test   = Y_vals[t:t + 1]
+
+        # Get adaptive lambda for this time step
+        current_date   = X.index[t]
+        if current_date in adaptive_lambdas.index:
+            alpha_t = adaptive_lambdas[current_date]
+            if np.isnan(alpha_t):
+                alpha_t = base_alpha
+        else:
+            alpha_t = base_alpha
+
+        preds, coefs = [], []
+        for j in range(Y_train.shape[1]):
+            model = model_class(alpha=alpha_t, **model_kwargs)
+            model.fit(X_train, Y_train[:, j])
+            preds.append(model.predict(X_test)[0])
+            coefs.append(model.coef_.copy())
+
+        predictions.append(preds)
+        actuals.append(Y_test[0])
+        dates.append(Y.index[t])
+        coefs_over_time.append(coefs)
+        lambdas_used.append(alpha_t)
+
+    return (np.array(predictions), np.array(actuals),
+            dates, np.array(coefs_over_time),
+            np.array(lambdas_used))
