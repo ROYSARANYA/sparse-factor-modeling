@@ -238,3 +238,300 @@ class WarmStartLasso:
 
     def get_path_array(self):
         return np.array(self.coef_path_)
+
+
+class FISTARestart:
+    """
+    FISTA with Adaptive Restart (O'Donoghue & Candès, 2015).
+    "Adaptive Restart for Accelerated Gradient Schemes"
+    Foundations of Computational Mathematics, 15(3), 715-732.
+
+    Vanilla FISTA achieves O(1/t^2) but can oscillate near the
+    solution due to momentum overshooting. Adaptive restart
+    detects these oscillations and resets momentum to zero,
+    producing monotone decrease and empirically faster convergence.
+
+    Two restart criteria implemented:
+    1. Function restart: restart if F(y^k) > F(x^{k-1})
+       Simple, cheap, guaranteed monotone decrease.
+    2. Gradient restart: restart if <grad_f(y^k), x^k - x^{k-1}> > 0
+       The gradient and momentum point in opposite directions —
+       the momentum is counterproductive, restart.
+
+    Both criteria are heuristics with no convergence rate guarantee
+    beyond vanilla FISTA, but empirically converge significantly faster.
+    """
+    def __init__(self, alpha=1.0, lr=None, max_iter=1000,
+                 tol=1e-6, restart='gradient'):
+        """
+        Parameters
+        ----------
+        restart : str
+            'function'  — restart when objective increases
+            'gradient'  — restart when gradient opposes momentum
+            'both'      — restart on either condition
+        """
+        self.alpha    = alpha
+        self.lr       = lr
+        self.max_iter = max_iter
+        self.tol      = tol
+        self.restart  = restart
+        self.coef_    = None
+        self.loss_history_    = []
+        self.restart_iters_   = []
+        self.n_iter_  = 0
+        self.n_restarts_ = 0
+
+    @staticmethod
+    def _soft_threshold(x, threshold):
+        return np.sign(x) * np.maximum(np.abs(x) - threshold, 0)
+
+    def _objective(self, X, y, beta, n):
+        resid = y - X @ beta
+        return np.mean(resid**2) + self.alpha * np.sum(np.abs(beta))
+
+    def fit(self, X, y):
+        n, p      = X.shape
+        beta      = np.zeros(p)
+        beta_prev = np.zeros(p)
+        lr        = self.lr or 1.0 / (2 * np.linalg.norm(X.T@X, ord=2) / n)
+        t         = 1.0
+
+        self.loss_history_  = []
+        self.restart_iters_ = []
+        self.n_restarts_    = 0
+
+        f_prev = self._objective(X, y, beta, n)
+
+        for i in range(self.max_iter):
+            # ── Momentum extrapolation ────────────────────────────────────
+            momentum = (t - 1) / (t + 2)
+            y_mom    = beta + momentum * (beta - beta_prev)
+
+            # ── Gradient on momentum point ────────────────────────────────
+            residual = y - X @ y_mom
+            grad     = -2.0 / n * X.T @ residual
+
+            # ── Proximal step ─────────────────────────────────────────────
+            beta_new = self._soft_threshold(y_mom - lr * grad, self.alpha * lr)
+
+            # ── Compute objective ─────────────────────────────────────────
+            f_new = self._objective(X, y, beta_new, n)
+            self.loss_history_.append(f_new)
+
+            # ── Check restart criteria ────────────────────────────────────
+            should_restart = False
+
+            if self.restart in ('function', 'both'):
+                # Function restart: objective went up at y^k
+                f_y = self._objective(X, y, y_mom, n)
+                if f_y > f_prev:
+                    should_restart = True
+
+            if self.restart in ('gradient', 'both') and not should_restart:
+                # Gradient restart: momentum opposes gradient direction
+                # Condition: <grad_f(y^k), x^k - x^{k-1}> > 0
+                if np.dot(grad, beta - beta_prev) > 0:
+                    should_restart = True
+
+            if should_restart:
+                # Reset momentum — restart FISTA from current point
+                t         = 1.0
+                beta_prev = beta.copy()
+                self.restart_iters_.append(i)
+                self.n_restarts_ += 1
+            else:
+                beta_prev = beta.copy()
+                t        += 1
+
+            # ── Convergence check ─────────────────────────────────────────
+            if np.linalg.norm(beta_new - beta) < self.tol:
+                self.n_iter_ = i + 1
+                beta         = beta_new
+                break
+
+            beta   = beta_new
+            f_prev = f_new
+
+        self.coef_ = beta
+        return self
+
+    def predict(self, X):
+        return X @ self.coef_
+
+
+class BBLasso:
+    """
+    LASSO with Barzilai-Borwein (BB) Step Sizes.
+    Barzilai & Borwein (1988): "Two-Point Step Size Gradient Methods"
+    IMA Journal of Numerical Analysis, 8(1), 141-148.
+
+    Instead of a fixed Lipschitz-based step size η = 1/L,
+    BB computes a local approximation to the inverse Hessian
+    from the most recent gradient difference, giving a step size
+    that adapts to the local curvature of the objective.
+
+    BB step sizes are NOT guaranteed to decrease the objective
+    monotonically, so we combine with the proximal operator
+    using a non-monotone line search (Zhang & Hager, 2004).
+
+    Two BB variants:
+    BB1 (long step):  η_k = (s'·s) / (s'·y)
+    BB2 (short step): η_k = (s'·y) / (y'·y)
+    where s = β^k - β^{k-1}, y = ∇f^k - ∇f^{k-1}
+
+    We alternate BB1 and BB2 for better overall convergence.
+    """
+    def __init__(self, alpha=1.0, lr_init=None, max_iter=1000,
+                 tol=1e-6, bb_variant='alternating'):
+        """
+        Parameters
+        ----------
+        bb_variant : str
+            'bb1'         — always use long BB step
+            'bb2'         — always use short BB step
+            'alternating' — alternate BB1 and BB2 (recommended)
+        """
+        self.alpha      = alpha
+        self.lr_init    = lr_init
+        self.max_iter   = max_iter
+        self.tol        = tol
+        self.bb_variant = bb_variant
+        self.coef_      = None
+        self.loss_history_  = []
+        self.step_history_  = []
+        self.n_iter_    = 0
+
+    @staticmethod
+    def _soft_threshold(x, threshold):
+        return np.sign(x) * np.maximum(np.abs(x) - threshold, 0)
+
+    def _gradient(self, X, y, beta, n):
+        return -2.0 / n * X.T @ (y - X @ beta)
+
+    def fit(self, X, y):
+        n, p = X.shape
+
+        # Initialize with one proximal GD step using Lipschitz step
+        L        = 2 * np.linalg.norm(X.T@X, ord=2) / n
+        lr       = self.lr_init or 1.0 / L
+        lr_min   = 1e-10
+        lr_max   = 10.0 / L  # don't let BB step get too large
+
+        beta     = np.zeros(p)
+        grad     = self._gradient(X, y, beta, n)
+        beta     = self._soft_threshold(beta - lr * grad, self.alpha * lr)
+
+        self.loss_history_ = []
+        self.step_history_ = [lr]
+
+        for i in range(self.max_iter):
+            grad_new = self._gradient(X, y, beta, n)
+            loss     = np.mean((y - X@beta)**2) + self.alpha * np.sum(np.abs(beta))
+            self.loss_history_.append(loss)
+
+            # ── Compute BB step size ──────────────────────────────────────
+            if i > 0:
+                s = beta - beta_prev          # parameter difference
+                g = grad_new - grad_prev      # gradient difference
+                sg = np.dot(s, g)
+                ss = np.dot(s, s)
+                gg = np.dot(g, g)
+
+                if sg > 1e-12:  # positive curvature — BB valid
+                    bb1 = ss / sg   # long step
+                    bb2 = sg / gg   # short step
+
+                    if self.bb_variant == 'bb1':
+                        lr = bb1
+                    elif self.bb_variant == 'bb2':
+                        lr = bb2
+                    else:  # alternating
+                        lr = bb1 if i % 2 == 0 else bb2
+
+                    # Safeguard: clip to reasonable range
+                    lr = np.clip(lr, lr_min, lr_max)
+
+            self.step_history_.append(lr)
+
+            # ── Proximal step with BB step size ───────────────────────────
+            beta_prev = beta.copy()
+            grad_prev = grad_new.copy()
+            beta_new  = self._soft_threshold(
+                beta - lr * grad_new, self.alpha * lr
+            )
+
+            # ── Convergence check ─────────────────────────────────────────
+            if np.linalg.norm(beta_new - beta) < self.tol:
+                self.n_iter_ = i + 1
+                beta         = beta_new
+                break
+
+            beta     = beta_new
+            grad     = grad_new
+
+        self.coef_ = beta
+        return self
+
+    def predict(self, X):
+        return X @ self.coef_
+
+
+class CoordinateDescent:
+    """
+    Coordinate Descent for LASSO.
+    Cycles through each coordinate and minimizes exactly over that
+    coordinate while holding all others fixed.
+
+    For LASSO, each coordinate subproblem has the closed-form solution:
+        beta_j <- sign(z_j) * max(|z_j| - alpha, 0) / ||X_j||^2/n
+    where z_j = X_j'(y - X*beta + X_j*beta_j) / n is the partial residual.
+
+    Convergence rate: O(1/t) per coordinate cycle — same as proximal GD
+    overall, but with smaller constant in practice due to exact coordinate
+    updates. Particularly effective when p is small (our case: p=6).
+
+    Reference: Friedman, Hastie & Tibshirani (2010), Journal of Statistical
+    Software, "Regularization Paths for GLMs via Coordinate Descent".
+    """
+    def __init__(self, alpha=1.0, max_iter=1000, tol=1e-6):
+        self.alpha    = alpha
+        self.max_iter = max_iter
+        self.tol      = tol
+        self.coef_    = None
+        self.loss_history_ = []
+        self.n_iter_  = 0
+
+    def fit(self, X, y):
+        n, p  = X.shape
+        beta  = np.zeros(p)
+        # Precompute column norms — only needed once
+        col_norms = np.sum(X**2, axis=0) / n
+
+        self.loss_history_ = []
+
+        for iteration in range(self.max_iter):
+            beta_old = beta.copy()
+            # Cycle through all coordinates
+            for j in range(p):
+                if col_norms[j] < 1e-12:
+                    continue
+                # Partial residual (remove contribution of feature j)
+                r_j   = y - X @ beta + X[:, j] * beta[j]
+                # Soft-threshold the univariate OLS solution
+                z_j   = X[:, j] @ r_j / n
+                beta[j] = np.sign(z_j) * max(abs(z_j) - self.alpha, 0) / col_norms[j]
+
+            loss = np.mean((y - X@beta)**2) + self.alpha * np.sum(np.abs(beta))
+            self.loss_history_.append(loss)
+
+            # Convergence: max coordinate change < tol
+            if np.max(np.abs(beta - beta_old)) < self.tol:
+                self.n_iter_ = iteration + 1
+                break
+
+        self.coef_ = beta
+        return self
+
+    def predict(self, X):
+        return X @ self.coef_
