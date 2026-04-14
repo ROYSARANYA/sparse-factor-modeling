@@ -180,3 +180,138 @@ def walk_forward_backtest_adaptive(X, Y, model_class,
     return (np.array(predictions), np.array(actuals),
             dates, np.array(coefs_over_time),
             np.array(lambdas_used))
+
+
+def compute_metrics_with_costs(predictions, actuals,
+                                bps_cost=10, turnover_penalty=True):
+    """
+    Compute performance metrics net of transaction costs.
+
+    Parameters
+    ----------
+    predictions  : (N x 25) predicted returns
+    actuals      : (N x 25) actual returns
+    bps_cost     : basis points per trade (default 10bps = 0.001)
+    turnover_penalty : whether to deduct turnover costs
+
+    Returns
+    -------
+    dict with gross and net metrics plus turnover statistics
+    """
+    from scipy.stats import spearmanr
+    cost_per_trade = bps_cost / 10000  # convert bps to decimal
+
+    ls_gross, ls_net, turnovers = [], [], []
+    ic_scores = []
+    prev_weights = None
+
+    for t, (pred, actual) in enumerate(zip(predictions, actuals)):
+        ranks = np.argsort(pred)
+
+        # Equal-weight long-short: top 3 long, bottom 3 short
+        n_side      = 3
+        long_idx    = ranks[-n_side:]
+        short_idx   = ranks[:n_side]
+
+        weights     = np.zeros(len(pred))
+        weights[long_idx]  =  1.0 / n_side
+        weights[short_idx] = -1.0 / n_side
+
+        # Gross return
+        gross_ret = np.dot(weights, actual)
+        ls_gross.append(gross_ret)
+
+        # Turnover = sum of absolute weight changes
+        if prev_weights is not None:
+            turnover = np.sum(np.abs(weights - prev_weights)) / 2
+        else:
+            turnover = np.sum(np.abs(weights)) / 2  # entry cost
+        turnovers.append(turnover)
+
+        # Net return after costs
+        net_ret = gross_ret - turnover * cost_per_trade
+        ls_net.append(net_ret)
+
+        # IC
+        ic, _ = spearmanr(pred, actual)
+        ic_scores.append(ic)
+
+        prev_weights = weights.copy()
+
+    ls_gross  = np.array(ls_gross)
+    ls_net    = np.array(ls_net)
+    turnovers = np.array(turnovers)
+
+    def sharpe(rets):
+        return rets.mean() / rets.std() * np.sqrt(12) if rets.std() > 0 else 0
+
+    ic_arr = np.array(ic_scores)
+
+    return {
+        'Gross_Sharpe':     round(sharpe(ls_gross), 4),
+        'Net_Sharpe_10bps': round(sharpe(ls_net), 4),
+        'IC_Mean':          round(ic_arr.mean(), 4),
+        'ICIR':             round(ic_arr.mean() / ic_arr.std(), 4),
+        'Avg_Turnover':     round(turnovers.mean(), 4),
+        'Ann_Turnover':     round(turnovers.mean() * 12, 4),
+        'Gross_Ann_Ret':    round(ls_gross.mean() * 12 * 100, 2),
+        'Net_Ann_Ret_10bps':round(ls_net.mean() * 12 * 100, 2),
+        'Cost_Drag_bps':    round((ls_gross.mean() - ls_net.mean()) * 12 * 10000, 1),
+    }
+
+
+def compute_alpha_decay(X, Y, model_class, alpha,
+                         max_horizon=6, train_window=120,
+                         **model_kwargs):
+    """
+    Compute alpha decay curve — how IC decays as holding period increases.
+    At horizon h, we predict returns h months ahead instead of 1 month.
+
+    Parameters
+    ----------
+    max_horizon : int — maximum holding period in months
+
+    Returns
+    -------
+    horizons : list of holding periods
+    ic_by_horizon : mean IC at each horizon
+    """
+    from scipy.stats import spearmanr
+
+    T       = len(X)
+    X_vals  = X.values
+    X_mean  = X_vals.mean(axis=0)
+    X_std   = X_vals.std(axis=0)
+    X_scaled = (X_vals - X_mean) / X_std
+    Y_vals  = Y.values
+
+    horizons       = list(range(1, max_horizon + 1))
+    ic_by_horizon  = []
+
+    for h in horizons:
+        ic_scores = []
+        for t in range(train_window, T - h):
+            X_train = X_scaled[t - train_window:t]
+            Y_train = Y_vals[t - train_window:t]
+            X_test  = X_scaled[t:t + 1]
+
+            # Target: h-month forward return
+            if t + h < T:
+                Y_test_h = Y_vals[t:t + h].mean(axis=0)  # average return over h months
+            else:
+                continue
+
+            preds = []
+            for j in range(Y.shape[1]):
+                m = model_class(alpha=alpha, **model_kwargs)
+                m.fit(X_train, Y_train[:, j])
+                preds.append(m.predict(X_test)[0])
+
+            ic, _ = spearmanr(preds, Y_test_h)
+            if not np.isnan(ic):
+                ic_scores.append(ic)
+
+        ic_by_horizon.append(np.mean(ic_scores) if ic_scores else 0)
+        print(f'  Horizon {h}m: IC = {ic_by_horizon[-1]:.4f} (n={len(ic_scores)})')
+
+    return horizons, ic_by_horizon
