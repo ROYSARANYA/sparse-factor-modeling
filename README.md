@@ -116,58 +116,222 @@ Maximum observed step: 1.944440 vs bound 1.944441 — machine precision tight.
 
 ```
 sparse-factor-modeling/
-│
-├── src/                          Core implementation
-│   ├── solvers.py                9 optimization algorithms from scratch
-│   │                               Ridge, LASSO, Elastic Net, FISTA,
-│   │                               FISTA+restart, BB LASSO, Coord Descent,
-│   │                               Online LASSO, Momentum-BB
-│   ├── backtest.py               Walk-forward backtesting engine
-│   │                               walk_forward_backtest
-│   │                               compute_metrics, compute_metrics_with_costs
-│   │                               compute_alpha_decay
-│   │                               walk_forward_backtest_adaptive
-│   ├── online_solver.py          Online LASSO with regret bound O(sqrt(T))
-│   ├── dro_solver.py             Wasserstein distributionally robust LASSO
-│   ├── cross_validation.py       Expanding-window time-series CV
-│   ├── regime.py                 Volatility regime classification
-│   ├── interactions.py           Pairwise factor interaction features
-│   ├── signal_discovery.py       Price/volume signal construction
-│   ├── data_loader.py            Fama-French data loader
-│   └── cvxpy_solvers.py          CVXPY reference implementations
-│
-├── scripts/                      Reproducibility scripts
-│   ├── 01_wall_clock_comparison.py     Table 2: algorithm timing
-│   ├── 02_dro_calibration.py           DRO epsilon calibration
-│   ├── 03_loss_landscape.py            Ridge vs LASSO geometry
-│   ├── 04_dollar_neutral_sharpe.py     Portfolio construction variants
-│   ├── 05_mv_optimizer.py              Mean-variance optimizer
-│   ├── 06_capacity_analysis.py         AUM breakeven curve
-│   ├── 07_factor_crowding.py           Factor crowding analysis
-│   ├── 08_kkt_dropout_prediction.py    KKT sparsity prediction
-│   ├── 09_novelty_momentum_bb.py       Momentum-BB convergence
-│   ├── 10_novelty_algorithm_theory.py  Algorithm selection theory
-│   ├── 11_time_series_analysis.py      ADF tests, autocorrelation
-│   ├── 12_highdim_oap.py               p=193 OAP validation
-│   ├── 13_spearman_rank_correlation.py  Novel: KKT ranking ρ=0.906
-│   ├── 14_fista_degradation.py          Novel: FISTA 0.95× at α=0.05
-│   └── 15_theorem4_bounded_steps.py     Novel: BB step size proof
-│
-├── notebooks/                    Step-by-step development with outputs
-│   ├── 01_data_preparation.ipynb
-│   ├── 02_ridge_implementation.ipynb
-│   ├── 03_lasso_implementation.ipynb
-│   ├── 04_elasticnet_implementation.ipynb
-│   ├── 05_cvxpy_formulation.ipynb
-│   ├── 06_experiments.ipynb
-│   ├── 07_backtesting.ipynb
-│   └── 08_novel_contributions.ipynb    Three novel findings with outputs
-│
-├── outputs/                      45 generated figures
-├── app/app.py                    Streamlit analytics platform (5 pages)
-├── .streamlit/config.toml        Dark theme configuration
-├── requirements.txt              Python dependencies
-└── README.md                     This file
+├── src/                 Core implementation (10 modules)
+├── scripts/             Reproducibility scripts (15 files)
+├── notebooks/           Jupyter notebooks with outputs (8 files)
+├── outputs/             Generated figures (45 PNG files)
+├── app/                 Streamlit analytics platform
+├── .streamlit/          Dark theme configuration
+├── requirements.txt     Python dependencies
+└── README.md            This file
+```
+
+---
+
+## File Descriptions
+
+### src/ — Core Implementation
+
+**`src/solvers.py`**
+Nine optimization algorithms implemented from scratch. Every class has `fit()`,
+`predict()`, `coef_`, `n_iter_`, and `loss_history_` for consistency.
+
+```
+RidgeScratch         Closed-form solution: β = (X'X + αnI)⁻¹ X'y
+LassoProximal        Proximal gradient descent with soft-thresholding
+ElasticNetScratch    Combined L1+L2 penalty via proximal gradient
+FISTALasso           Accelerated proximal gradient — O(1/t²) convergence
+FISTARestart         FISTA with adaptive restart (O'Donoghue & Candès 2015)
+BBLasso              Barzilai-Borwein adaptive step sizes — alternates BB1/BB2
+CoordinateDescent    Cyclic coordinate descent — fastest empirically (9 iters)
+WarmStartLasso       Full regularization path with warm-start initialization
+MomentumBBLasso      Novel: combines BB step sizes with Nesterov momentum
+```
+
+**`src/backtest.py`**
+Walk-forward backtesting engine. Training window expands month by month —
+no look-ahead bias. All five functions follow the same interface.
+
+```
+walk_forward_backtest()          Standard walk-forward: 120-month training window,
+                                 168 out-of-sample predictions (2010–2023)
+
+compute_metrics()                Computes OOS R², Sharpe, ICIR, mean IC,
+                                 annualized return — all from predictions alone
+
+compute_metrics_with_costs()     Adds transaction cost model: gross/net Sharpe
+                                 at 10bps and 50bps round-trip cost
+
+compute_alpha_decay()            Measures IC at horizons 1M through 12M —
+                                 quantifies how quickly signal decays
+
+walk_forward_backtest_adaptive() Regime-aware backtest: scales lambda by current
+                                 rolling volatility relative to historical mean
+```
+
+**`src/online_solver.py`**
+Online LASSO using stochastic proximal gradient. Updates one observation at a time —
+no retraining required. Achieves O(√T) regret bound.
+
+```
+OnlineLasso              update(x, y) → incremental fit
+                         predict(x) → single prediction
+walk_forward_online()    Full streaming backtest returning same format
+                         as walk_forward_backtest for direct comparison
+```
+
+**`src/dro_solver.py`**
+Wasserstein distributionally robust LASSO. Adds an L2 penalty on β scaled by ε,
+representing worst-case perturbation under a Wasserstein ball of radius ε.
+Tractable dual formulation: min (1/n)||y-Xβ||² + ε||β||₂ + α||β||₁
+
+```
+dro_lasso_cvxpy()    CVXPY reference implementation
+DROLasso             Sklearn-compatible wrapper (fit, predict, coef_)
+                     epsilon=0 reduces to standard LASSO
+```
+
+**`src/cross_validation.py`**
+Time-series cross-validation with expanding window. Never uses future data —
+training always precedes validation.
+
+```
+time_series_cv()       n_splits folds, returns best alpha and full CV results
+find_best_alphas()     Runs CV for all 25 portfolios, returns median best alpha
+```
+
+**`src/regime.py`**
+Volatility regime classification based on rolling market return standard deviation.
+Four regimes: low, medium, high, crisis.
+
+```
+compute_rolling_volatility()    Rolling std of market returns (annualized)
+compute_adaptive_lambda()       Scales base_lambda by vol_t / mean_vol,
+                                clipped to [0.5×, 3.0×] range
+identify_regimes()              Assigns each month to low/medium/high/crisis
+                                using 33rd and 67th percentile thresholds
+```
+
+**`src/interactions.py`**
+Extends the 6-factor model with C(6,2)=15 pairwise interaction terms,
+expanding X from shape (288,6) to (288,21).
+
+```
+build_interaction_features()        Constructs all 15 pairwise products
+analyze_interaction_selection()     Runs LASSO on expanded feature set
+                                    across all 25 portfolios, returns
+                                    selection matrix (25×21)
+```
+
+**`src/signal_discovery.py`**
+Constructs 15+ predictive signals from raw price/volume data using yfinance.
+Used to test whether fundamental accounting signals (FF factors) can be
+replicated from price history alone. Key finding: they cannot (IC 0.614 vs 0.008).
+
+```
+download_price_data()           Downloads monthly OHLCV for 50 S&P500 stocks
+construct_signals()             Builds momentum, reversal, volatility,
+                                volume, and price-ratio signals
+build_cross_sectional_dataset() Aligns signals with forward returns
+```
+
+**`src/data_loader.py`**
+Loads and aligns three Kenneth French Data Library datasets. Downloads
+automatically from the web on first run — no manual setup required.
+
+```
+load_all_data()     Returns (X, Y, factor_names, portfolio_names)
+                    X: (288, 6) factor returns 2000-2023
+                    Y: (288, 25) portfolio returns 2000-2023
+```
+
+**`src/cvxpy_solvers.py`**
+CVXPY reference implementations for Ridge, LASSO, and Elastic Net.
+Used to verify that scratch implementations match the convex program solution.
+All three are confirmed DCP (disciplined convex programs).
+
+---
+
+### scripts/ — Reproducibility Scripts
+
+Each script is standalone — run from the project root with `python3 scripts/name.py`.
+All figures are saved to `outputs/`.
+
+```
+01_wall_clock_comparison.py      Benchmarks all 6 algorithms on 25 portfolios
+                                 Generates: outputs/benchmark_timing.png
+
+02_dro_calibration.py            Tests DRO at ε ∈ {0, 0.01, 0.05, 0.091, 0.15}
+                                 Finds data-driven ε = 0.091 via bootstrap
+
+03_loss_landscape.py             Visualizes Ridge vs LASSO objective geometry
+                                 Shows L1 ball corner solutions vs L2 sphere
+
+04_dollar_neutral_sharpe.py      Tests long-short portfolio construction
+                                 Dollar-neutral constraint: sum(weights) = 0
+
+05_mv_optimizer.py               Mean-variance QP: min w'Σw - λμ'w
+                                 Subject to dollar-neutral, |w|≤2, |wi|≤0.15
+
+06_capacity_analysis.py          Computes AUM breakeven as function of fund size
+                                 Market impact model: cost ~ AUM^0.6
+
+07_factor_crowding.py            Measures pairwise factor correlation over time
+                                 Rolling 36-month windows, identifies crowding
+
+08_kkt_dropout_prediction.py     Tests KKT condition as sparsity predictor
+                                 Computes |[C⁻¹c_k]_j| vs actual dropout
+
+09_novelty_momentum_bb.py        Compares Momentum-BB vs all other algorithms
+                                 Shows convergence on 3 representative portfolios
+
+10_novelty_algorithm_theory.py   Algorithm selection theory: κ vs speedup
+                                 Generates conjecture 1 supporting evidence
+
+11_time_series_analysis.py       ADF stationarity tests, Ljung-Box autocorrelation
+                                 Heteroskedasticity analysis (ARCH effects)
+
+12_highdim_oap.py                Validates all algorithms at p=193 (OAP dataset)
+                                 BB LASSO 6.4× faster than PGD at high dimension
+
+13_spearman_rank_correlation.py  NOVEL: KKT factor ranking prediction
+                                 Result: mean Spearman ρ = 0.906 across 25 portfolios
+
+14_fista_degradation.py          NOVEL: FISTA speedup vs regularization strength
+                                 Result: FISTA 0.95× at α=0.05 (slower than PGD)
+
+15_theorem4_bounded_steps.py     NOVEL: BB step size bound verification
+                                 Result: 0 violations of 1/L ≤ η_k ≤ 1/μ
+```
+
+### notebooks/ — Step-by-Step Development
+
+All notebooks have embedded outputs — no re-execution needed to view results.
+
+```
+01_data_preparation.ipynb        Data loading, summary statistics, correlation
+                                 matrix, portfolio return distributions
+
+02_ridge_implementation.ipynb    Ridge from scratch, closed-form derivation,
+                                 regularization path, coefficient stability
+
+03_lasso_implementation.ipynb    Proximal gradient derivation, soft-thresholding
+                                 proof, convergence plot, sparsity demonstration
+
+04_elasticnet_implementation.ipynb  Grouping effect: HML/CMA both survive EN
+                                    but LASSO drops one (correlation = 0.632)
+
+05_cvxpy_formulation.ipynb       All 4 methods as explicit DCP programs
+                                 is_dcp()=True verified for all formulations
+
+06_experiments.ipynb             CV lambda selection, factor dropout table,
+                                 regime analysis, DRO, interactions, signals
+
+07_backtesting.ipynb             Full walk-forward results, rolling IC chart,
+                                 regime breakdown, master results figure
+
+08_novel_contributions.ipynb     Three novel findings with code and outputs:
+                                 FISTA degradation, KKT ranking, Theorem 4
 ```
 
 ---
