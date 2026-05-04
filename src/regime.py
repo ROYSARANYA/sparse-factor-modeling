@@ -50,7 +50,7 @@ def compute_adaptive_lambda(market_returns, base_lambda,
     mean_vol     = rolling_vol.mean()
     scale        = (rolling_vol / mean_vol).clip(clip_min, clip_max)
     adaptive_lam = base_lambda * scale
-    return adaptive_lam, rolling_vol
+    return adaptive_lam
 
 
 def identify_regimes(market_returns, window=12,

@@ -142,7 +142,7 @@ def walk_forward_backtest_adaptive(X, Y, model_class,
 
     # Compute adaptive lambda for each time step
     mkt_returns              = X['Mkt-RF']
-    adaptive_lambdas, vol    = compute_adaptive_lambda(
+    adaptive_lambdas = compute_adaptive_lambda(
         mkt_returns, base_alpha, window=window
     )
 

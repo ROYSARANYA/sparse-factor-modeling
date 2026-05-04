@@ -4,3 +4,7 @@ __pycache__/
 .DS_Store
 data/*.csv
 .ipynb_checkpoints/
+docs/
+Research_papers/
+*.docx
+*.pdf

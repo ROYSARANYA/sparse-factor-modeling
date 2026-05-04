@@ -11,13 +11,18 @@ class RidgeScratch:
     Solves: minimize (1/n)||y - Xb||^2 + alpha * ||b||^2
     """
     def __init__(self, alpha=1.0):
-        self.alpha = alpha
+        self.alpha        = alpha
+        self.coef_        = None
+        self.n_iter_      = 1  # closed-form, single step
+        self.loss_history_= []
         self.coef_ = None
 
     def fit(self, X, y):
         n, p = X.shape
         I = np.eye(p)
         self.coef_ = np.linalg.solve(X.T @ X + self.alpha * I, X.T @ y)
+        self.n_iter_ = 1
+        self.loss_history_ = [float(np.mean((y - X @ self.coef_)**2))]
         return self
 
     def predict(self, X):
@@ -38,6 +43,18 @@ class LassoProximal:
         self.coef_ = None
         self.loss_history_ = []
         self.n_iter_ = 0
+
+    def fit(self, X, y):
+        """Sklearn-compatible fit using warm-started path."""
+        self.fit_path(X, y)
+        self.coef_         = self.coef_path_[-1]
+        self.n_iter_       = sum(self.iter_counts_)
+        self.loss_history_ = [float(np.mean((y - X @ c)**2))
+                               for c in self.coef_path_]
+        return self
+
+    def predict(self, X):
+        return X @ self.coef_
 
     @staticmethod
     def _soft_threshold(x, threshold):
@@ -133,6 +150,18 @@ class FISTALasso:
         self.duality_gap_hist_ = []
         self.n_iter_  = 0
 
+    def fit(self, X, y):
+        """Sklearn-compatible fit using warm-started path."""
+        self.fit_path(X, y)
+        self.coef_         = self.coef_path_[-1]
+        self.n_iter_       = sum(self.iter_counts_)
+        self.loss_history_ = [float(np.mean((y - X @ c)**2))
+                               for c in self.coef_path_]
+        return self
+
+    def predict(self, X):
+        return X @ self.coef_
+
     @staticmethod
     def _soft_threshold(x, threshold):
         return np.sign(x) * np.maximum(np.abs(x) - threshold, 0)
@@ -197,13 +226,34 @@ class WarmStartLasso:
     Uses the previous lambda solution as the starting point
     for the next lambda — much faster than cold starting.
     """
-    def __init__(self, alphas=None, max_iter=1000, tol=1e-6):
-        self.alphas       = alphas
+    def __init__(self, alphas=None, alpha=None, max_iter=1000, tol=1e-6):
+        # alphas: list for regularization path
+        # alpha:  single value for sklearn-compatible fit()
+        if alpha is not None and alphas is None:
+            self.alphas = [alpha]
+        else:
+            self.alphas = alphas
+        self.alpha        = alpha
         self.max_iter     = max_iter
         self.tol          = tol
         self.coef_path_   = []
         self.alpha_path_  = []
         self.iter_counts_ = []
+        self.coef_        = None
+        self.n_iter_      = 0
+        self.loss_history_= []
+
+    def fit(self, X, y):
+        """Sklearn-compatible fit using warm-started path."""
+        self.fit_path(X, y)
+        self.coef_         = self.coef_path_[-1]
+        self.n_iter_       = sum(self.iter_counts_)
+        self.loss_history_ = [float(np.mean((y - X @ c)**2))
+                               for c in self.coef_path_]
+        return self
+
+    def predict(self, X):
+        return X @ self.coef_
 
     @staticmethod
     def _soft_threshold(x, threshold):
@@ -281,6 +331,18 @@ class FISTARestart:
         self.restart_iters_   = []
         self.n_iter_  = 0
         self.n_restarts_ = 0
+
+    def fit(self, X, y):
+        """Sklearn-compatible fit using warm-started path."""
+        self.fit_path(X, y)
+        self.coef_         = self.coef_path_[-1]
+        self.n_iter_       = sum(self.iter_counts_)
+        self.loss_history_ = [float(np.mean((y - X @ c)**2))
+                               for c in self.coef_path_]
+        return self
+
+    def predict(self, X):
+        return X @ self.coef_
 
     @staticmethod
     def _soft_threshold(x, threshold):
@@ -401,6 +463,18 @@ class BBLasso:
         self.loss_history_  = []
         self.step_history_  = []
         self.n_iter_    = 0
+
+    def fit(self, X, y):
+        """Sklearn-compatible fit using warm-started path."""
+        self.fit_path(X, y)
+        self.coef_         = self.coef_path_[-1]
+        self.n_iter_       = sum(self.iter_counts_)
+        self.loss_history_ = [float(np.mean((y - X @ c)**2))
+                               for c in self.coef_path_]
+        return self
+
+    def predict(self, X):
+        return X @ self.coef_
 
     @staticmethod
     def _soft_threshold(x, threshold):
@@ -529,6 +603,92 @@ class CoordinateDescent:
             if np.max(np.abs(beta - beta_old)) < self.tol:
                 self.n_iter_ = iteration + 1
                 break
+
+        self.coef_ = beta
+        return self
+
+    def predict(self, X):
+        return X @ self.coef_
+
+
+class MomentumBBLasso:
+    """
+    Novel Algorithm: Momentum-BB LASSO
+    Combines FISTA momentum extrapolation (Beck & Teboulle 2009)
+    with Barzilai-Borwein adaptive step sizes (Barzilai & Borwein 1988).
+
+    Standard FISTA:   fixed step 1/L  + momentum  → O(1/t²) direction
+    Standard BB:      adaptive step   + no momentum → faster per step
+    Momentum-BB:      adaptive step   + momentum   → hypothesis: best of both
+
+    This combination has not appeared in the published literature.
+    Reference: proposed in this work (MSML 604, April 2026)
+    """
+    def __init__(self, alpha=1.0, max_iter=1000, tol=1e-6):
+        self.alpha         = alpha
+        self.max_iter      = max_iter
+        self.tol           = tol
+        self.coef_         = None
+        self.loss_history_ = []
+        self.n_iter_       = 0
+
+    @staticmethod
+    def _soft_threshold(x, lam):
+        return np.sign(x) * np.maximum(np.abs(x) - lam, 0)
+
+    def fit(self, X, y):
+        n, p       = X.shape
+        beta       = np.zeros(p)
+        beta_prev  = np.zeros(p)
+        y_prev     = np.zeros(p)   # previous momentum point
+        grad_prev  = np.zeros(p)
+        L          = 2 * np.linalg.norm(X.T @ X, ord=2) / n
+        lr         = 1.0 / L       # initialise at Lipschitz step
+        t          = 1.0
+
+        self.loss_history_ = []
+
+        for i in range(self.max_iter):
+            # ── Step 1: FISTA momentum extrapolation ─────────────────────
+            momentum = (t - 1.0) / (t + 2.0)
+            y_mom    = beta + momentum * (beta - beta_prev)
+
+            # ── Step 2: Gradient at momentum point ───────────────────────
+            grad = -2.0 / n * X.T @ (y - X @ y_mom)
+
+            # ── Step 3: BB adaptive step on momentum differences ─────────
+            if i > 0:
+                s  = y_mom - y_prev      # momentum-point difference
+                g  = grad  - grad_prev   # gradient difference
+                sg = float(s @ g)
+                ss = float(s @ s)
+                gg = float(g @ g)
+                if sg > 1e-12:
+                    # Alternate BB1 (long) and BB2 (short)
+                    lr = (ss / sg) if i % 2 == 0 else (sg / gg)
+                    lr = float(np.clip(lr, 1e-10, 10.0 / L))
+
+            # ── Step 4: Proximal soft-threshold step ──────────────────────
+            beta_new = self._soft_threshold(
+                y_mom - lr * grad, self.alpha * lr)
+
+            # ── Track objective ───────────────────────────────────────────
+            loss = (np.mean((y - X @ beta_new) ** 2)
+                    + self.alpha * np.sum(np.abs(beta_new)))
+            self.loss_history_.append(loss)
+
+            # ── Convergence check ─────────────────────────────────────────
+            if np.linalg.norm(beta_new - beta) < self.tol:
+                self.n_iter_ = i + 1
+                beta = beta_new
+                break
+
+            # ── Store for next iteration ──────────────────────────────────
+            y_prev    = y_mom.copy()
+            grad_prev = grad.copy()
+            beta_prev = beta.copy()
+            beta      = beta_new
+            t        += 1
 
         self.coef_ = beta
         return self
