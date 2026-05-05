@@ -1,6 +1,55 @@
 """
-Fix 2: Wall-clock normalized algorithm comparison
-Generates: outputs/benchmark_timing.png
+01_wall_clock_comparison.py
+====================
+Wall-clock-normalized comparison of five first-order LASSO solvers against a
+CVXPY reference solution across all 25 target variables in the dataset.
+
+What it does
+------------
+1. Data loading & preprocessing
+   - Loads the full factor matrix X and target matrix Y via `load_all_data()`.
+   - Column-standardizes X (zero mean, unit variance) so every solver operates
+     on the same scaled input and regularization strength is comparable.
+
+2. Solver lineup
+   Five iterative solvers are benchmarked:
+     • Proximal GD      – vanilla proximal gradient descent (baseline)
+     • FISTA vanilla    – accelerated ISTA (Beck & Teboulle, 2009), no restart
+     • FISTA+fn restart – FISTA with function-value restart heuristic to damp
+                          oscillations near the optimum
+     • BB LASSO (alt)   – Barzilai–Borwein step-size selection (gradient-based
+                          adaptive learning rate, no line search)
+     • Coord Descent    – cyclic coordinate descent (sklearn-style)
+
+3. Benchmarking loop  (25 targets × 20 timing reps each)
+   For every target column j in Y:
+     a. A CVXPY interior-point solution is computed as the ground-truth
+        coefficient vector `ref_j`.
+     b. Each solver is fitted 20 times; wall-clock milliseconds are recorded
+        with `time.perf_counter()` and averaged to reduce timer noise.
+     c. Iteration count (`n_iter_`) and L∞ coefficient error vs. CVXPY are
+        stored.
+
+4. Metrics reported (printed table + saved plot)
+   - Mean Iters      : average iterations to convergence over 25 targets
+   - Wall-Clock ms   : mean wall time per fit (averaged over targets & reps)
+   - Coef Error      : mean L∞ distance from the CVXPY reference solution
+   - vs PGD          : wall-clock speedup ratio relative to Proximal GD
+
+5. Diagnostic note
+   Prints the BB-vs-CD wall-clock ratio; with only p=6 features the expected
+   speedup of coordinate descent vanishes, so the two should be near-identical.
+
+6. Output
+   Saves the comparison bar chart to `outputs/benchmark_timing.png`.
+
+Dependencies
+------------
+numpy, matplotlib, time, sys
+src.data_loader   – load_all_data()
+src.solvers       – LassoProximal, FISTALasso, FISTARestart, BBLasso,
+                    CoordinateDescent
+src.cvxpy_solvers – lasso_cvxpy  (ground-truth reference)
 """
 import sys, numpy as np, time
 import matplotlib
