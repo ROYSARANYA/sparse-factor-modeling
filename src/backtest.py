@@ -1,6 +1,153 @@
 """
-Walk-forward backtesting for time series financial data.
-Strictly respects temporal ordering - no look-ahead bias.
+backtesting.py
+==============
+Walk-forward backtesting engine for time-series financial factor models.
+Enforces strict temporal ordering throughout — no future data ever leaks
+into any training window.
+
+Module overview
+---------------
+The file exposes four public functions that build on each other:
+
+  walk_forward_backtest            – core rolling-window engine
+  compute_metrics                  – OOS performance statistics
+  walk_forward_backtest_adaptive   – regime-aware variant with dynamic lambda
+  compute_metrics_with_costs       – net-of-transaction-cost performance
+  compute_alpha_decay              – IC decay curve over holding horizons
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+walk_forward_backtest(X, Y, model_class, alpha, train_window=120, step=1)
+-------------------------------------------------------------------------
+The core engine. Simulates a live trading process month-by-month with a
+fixed-length lookback window.
+
+  Preprocessing:
+    X is standardized using its FULL-SAMPLE mean and std (a deliberate
+    simplification — in strict no-lookahead setups this would be
+    recomputed inside each fold, but here it provides stable scaling).
+
+  Rolling loop  (t = train_window … T, stride = step):
+    At each time step t:
+      • Training slice  → X_scaled[t-train_window : t],  Y[t-train_window : t]
+      • Test slice      → X_scaled[t : t+1],             Y[t : t+1]
+      A separate model is fitted independently for each of the 25 target
+      portfolios (j = 0…24), then a single one-step-ahead prediction is
+      generated.  Coefficients are captured before the model is discarded.
+
+  Returns four arrays:
+    predictions     (N × 25)       out-of-sample predicted returns
+    actuals         (N × 25)       realised returns at the same dates
+    dates           (N,)           index of each prediction date
+    coefs_over_time (N × 25 × 6)  factor loadings at every step, enabling
+                                   coefficient stability / drift analysis
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+compute_metrics(predictions, actuals)
+--------------------------------------
+Summarizes backtest quality with five complementary lenses:
+
+  OOS R²      Pooled out-of-sample R² (all portfolios × all months
+              flattened), measuring overall predictive fit vs. the
+              zero-return naive forecast.
+
+  Long-Short construction:
+              Each month, rank the 25 portfolios by predicted return.
+              Go long the top 3, short the bottom 3 (equal-weight within
+              each leg).  Using 3 per side avoids loading purely on the
+              structural size/value spread while still reducing noise vs.
+              a single-name bet.
+              LS return = mean(long actuals) − mean(short actuals).
+
+  Sharpe      Annualized Sharpe of the LS return series
+              (mean × 12) / (std × √12).
+
+  IC / ICIR   Spearman rank correlation between predicted and actual
+              returns each month (Information Coefficient).  ICIR =
+              IC_mean / IC_std penalizes inconsistent predictors — a
+              high mean IC with large variance is unreliable in practice.
+
+  All values rounded for clean display; returns and vol expressed as
+  percentages where intuitive.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+walk_forward_backtest_adaptive(X, Y, model_class, base_alpha, window=12, …)
+---------------------------------------------------------------------------
+Extends the core engine with regime-aware regularization.  Instead of a
+fixed alpha, lambda is scaled at every time step by recent market
+volatility via `src.regime.compute_adaptive_lambda`:
+
+  High-vol regime  → larger alpha → heavier shrinkage → more stable,
+                     conservative coefficients.
+  Low-vol regime   → smaller alpha → coefficients free to track signal.
+
+  The market return series (X['Mkt-RF']) is used as the vol proxy.
+  If the adaptive lambda for a given date is NaN (e.g., insufficient
+  history at the start of the sample), it falls back to base_alpha.
+
+  Returns the same four arrays as the base engine plus:
+    lambdas_used (N,)  — the actual alpha applied at each step, which
+                         can be plotted against vol regimes for diagnosis.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+compute_metrics_with_costs(predictions, actuals, bps_cost=10)
+--------------------------------------------------------------
+Repeats the LS construction but deducts realistic transaction costs.
+
+  Portfolio construction:
+    Same top-3 / bottom-3 ranking as compute_metrics, but positions are
+    represented as explicit weight vectors (±1/3 per name) so turnover
+    can be computed precisely.
+
+  Turnover:
+    Turnover_t = Σ|w_t − w_{t-1}| / 2  (half the sum of absolute
+    weight changes, the standard one-way turnover definition).
+    At t=0 the entry cost is treated as half the gross weight sum.
+
+  Cost drag:
+    Net return_t = Gross return_t − Turnover_t × (bps_cost / 10_000).
+    Default 10 bps per unit of turnover is a conservative institutional
+    estimate for liquid equity futures / ETFs.
+
+  Reports both gross and net Sharpe, annualized returns, average monthly
+  and annualized turnover, and the annualized cost drag in basis points —
+  making the cost-of-rebalancing trade-off directly legible.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+compute_alpha_decay(X, Y, model_class, alpha, max_horizon=6, …)
+---------------------------------------------------------------
+Measures how quickly the model's predictive edge decays with holding
+period — a standard "alpha decay" diagnostic in quantitative finance.
+
+  For each horizon h in {1, 2, …, max_horizon}:
+    The target is the average realized return over months [t, t+h) rather
+    than the single next-month return.  The model is still trained on a
+    one-step return series and predicts one step ahead; the test target
+    is the h-month cumulative (averaged) forward return.
+
+  IC is recomputed for each horizon and averaged across all folds.
+  A fast IC decay (IC collapses by h=2 or h=3) indicates the model
+  captures short-lived momentum / mean-reversion signals.  A slow decay
+  suggests persistent factor exposure suited to lower-turnover strategies.
+
+  Progress is printed per horizon for monitoring, since the triple-nested
+  loop (horizons × time steps × portfolios) is computationally expensive.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Dependencies
+------------
+numpy, pandas, sklearn.metrics.r2_score, scipy.stats.spearmanr
+src.regime   – compute_adaptive_lambda  (adaptive engine only)
+
+Inputs expected
+---------------
+X : pd.DataFrame (T × 6)   factor returns (Mkt-RF, SMB, HML, …)
+Y : pd.DataFrame (T × 25)  portfolio returns, DateTime-indexed
 """
 import numpy as np
 import pandas as pd
